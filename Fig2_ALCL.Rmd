@@ -1,0 +1,700 @@
+---
+title: "ALCL TME signature among PTCL"
+date: '`r Sys.Date()`'
+output:
+    html_notebook:
+    fig_height: 12
+    fig_width: 10
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r, echo=FALSE,message=FALSE, warning=FALSE}
+library(ggplot2)
+library(RColorBrewer)
+library(tidyr)
+library(viridis)
+library(MCPcounter)
+library(ConsensusClusterPlus)
+library(pheatmap)
+library(cba)
+```
+
+# Patients metadata and functions
+
+```{r}
+
+metadata_patients <- read.table(file = "./ALCL_Patients_metadata.csv", header = TRUE)
+metadata_patients <- metadata_patients[order(metadata_patients$name),]
+head(metadata_patients)
+dim(metadata_patients)
+summary(as.factor(metadata_patients$patho))
+summary(as.factor(metadata_patients$relapse))
+summary(as.factor(metadata_patients$morpho))
+
+# important functions
+
+##########################
+hcopt <- function(d, HC=NULL, method = "ward.D", members = NULL){
+  require("cba")
+  if ( is.null(HC) ) {
+    HC <- hclust(d,method=method,members=members)
+  }
+  #optimal leaf ordering
+  ORD <- cba::order.optimal(d,merge=HC$merge)
+  HC$merge <- ORD$merge
+  HC$order <- ORD$order
+  HC
+}
+
+###########################
+colGradient <- function( cols, length, cmax=255 )
+{
+  ## e.g., to create a white-to-red gradient with 10 levels
+  ##
+  ##   colGradient(cols=c('white','red'),length=10)
+  ##
+  ## or, to create a blue-to-white-to-red gradients with 9 colors (4 blue's, white, 4 red's)
+  ##
+  ##   colGradient(cols=c('blue','white','red'),length=9)
+  ##
+  ramp <- grDevices::colorRamp(cols)
+  rgb( ramp(seq(0,1,length=length)), max=cmax )
+}
+```
+
+# CIBERSORT with LM22 matrix on ALCL samples
+
+## Estimation of cell populations with CIBERSORTX and LM22 (default) matrix done online
+
+```{r}
+
+ciber_estim_22 <- t(as.matrix(read.table(file = "/home/chloe.bessiere/Documents/CRCT-2022/ALCL/Tum_Microenvironment/CIBERSORT_results/CibersortX_Patients-RNAseq/CIBERSORTx_LM22_RNAseq_patients_tximport_rf_permut_500_with_fibro-short.csv", header = TRUE, row.names = 1)))
+ciber_estim_22 <- ciber_estim_22[,which(colnames(ciber_estim_22)%in%metadata_patients$name)]
+ciber_estim_22 <- ciber_estim_22[,order(colnames(ciber_estim_22))]
+ciber_estim_22 <- ciber_estim_22[-c(23:26),]
+dim(ciber_estim_22)
+#head(ciber_estim_22)
+
+ciber_estim_22_scaled <- t(scale(t(ciber_estim_22)))
+head(ciber_estim_22_scaled)
+```
+
+### Hierarchical clustering based on patients (relapsing or not) + RLN
+
+```{r}
+
+# # side and heatmap color - function of relapse
+# my_group <- as.numeric(as.factor(metadata_patients[which(!is.na(metadata_patients$relapse)),]$relapse))
+# colSide <- brewer.pal(5, "Set2")[my_group]
+# colMain <- colorRampPalette(brewer.pal(8, "YlGnBu"))(25)
+# # heatmap
+# # orange = LT, green = ALCL
+# heatmap(ciber_estim_22[which(rownames(ciber_estim_22)%in%(metadata_patients[which(!is.na(metadata_patients$relapse)),]$name)),1:22], RowSideColors=colSide, col=colMain,margins = c(11,4), labRow = metadata_patients[which(!is.na(metadata_patients$relapse)),]$relapse)
+# legend(x = "right", inset=0.01, legend = c("low", "medium", "high"), cex = 0.8, fill = colorRampPalette(brewer.pal(8, "YlGnBu"))(3))
+
+## use Eculidean distance for columns/samples
+## use ward as agglomeration rule
+hc01.col <- hcopt(dist(t(ciber_estim_22_scaled)),method="ward.D")
+## use 1-correlation as distance for for rows/genes
+## use ward as agglomeration rule
+hc01.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled))),method="ward.D")
+
+## making heatmap
+annot <- data.frame(relapse=as.factor(metadata_patients[,c("relapse")]),morpho=as.factor(metadata_patients[,c("morpho")]))
+rownames(annot) <-metadata_patients$name
+annotCol <- list(relapse = c("green", "orange", "purple"), morpho=c("turquoise","yellow"))
+names(annotCol$relapse) <- levels(annot$relapse)
+names(annotCol$morpho) <- levels(annot$morpho)
+                 
+heatmaptitle <- paste("ALCL Dataset: ", "top MAD-filtered 4k genes", sep = "")
+
+pheatmap(ciber_estim_22_scaled, name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot,
+         annotation_colors = annotCol,
+         cluster_rows=hc01.row,
+         cluster_cols=hc01.col,
+         show_colnames = FALSE,
+         scale = "row", cutree_cols = 2)
+```
+
+### Consensus clustering based on patients (relapsing or not) + RLN
+
+* more stable than previous method
+
+```{r}
+
+# clustering / k choice
+CCout <- ConsensusClusterPlus(ciber_estim_22_scaled,maxK=4,reps=500,pItem=0.8,pFeature=1,
+                              innerLinkage="ward.D", finalLinkage="ward.D",
+                              title="cc",clusterAlg="hc",distance="euclidean",
+                              plot=NULL)
+summary(CCout)
+
+## notice the use of a variable (rather than using 3 directly in the following commands)
+nc <- 3
+## remake heatmap, include both subtype and cluster assignments for visual comparison
+annot1 <- data.frame(annot,cluster=CCout[[nc]]$consensusClass)
+annot1$cluster <- as.factor(annot1$cluster)
+annotCol$cluster <- rainbow(n=nc)
+names(annotCol$cluster) <- unique(annot1$cluster)
+
+## use cluster tree from consensus clustering for column ordering in heatmap
+clust.col <- CCout[[nc]]$consensusTree
+## determine row ordering based on de-novo clustering
+clust.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled))),method="ward.D")
+
+heatmaptitle <- "Heatmap consensus clustering assignment vs. subtype"
+pheatmap(ciber_estim_22_scaled, name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot1,
+         annotation_colors = annotCol,
+         cluster_rows=clust.row,
+         cluster_cols=clust.col,
+         #show_rownames = FALSE,
+         show_colnames = FALSE,
+         scale = "row", cutree_cols = 3)
+
+pheatmap(ciber_estim_22_scaled, name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot1,
+         annotation_colors = annotCol,
+         cluster_rows=clust.row,
+         cluster_cols=clust.col,
+         #show_rownames = FALSE,
+         show_colnames = FALSE,
+         cutree_cols = 3)
+
+```
+### p-values comparing ALCL to RLN
+
+```{r ciber 22 pvals, warning = FALSE}
+
+# create a dataframe for ggplot2 figures
+d <- as.data.frame(cbind(sample=rownames(t(ciber_estim_22)),t(ciber_estim_22))) %>% 
+gather(key = "cell_type", value = "score", 2:23, na.rm = TRUE, factor_key=TRUE)
+d$score <- as.numeric(d$score)
+d_metadat <- cbind(cbind(cbind(morpho=rep(metadata_patients$morpho,22),relapse=rep(metadata_patients$relapse,22)),patho=rep(metadata_patients$patho,22)),d)
+d_metadat <- d_metadat[order(d_metadat$relapse),]
+d_metadat$sample <- factor(d_metadat$sample, levels = unique(d_metadat$sample))
+
+
+# p-values between ALCL and REC (RLN) for the different cell types
+wilcox_pval <- c()
+cells <- unique(d$cell_type)
+i <- 1
+for (c in cells) {
+  mat <- cbind(patho=metadata_patients$patho, d[which(d$cell_type==c),])
+  mat <- mat[which(mat$patho!="NA"),]
+  # wilcox test :
+  wilcox_pval[i] <- wilcox.test(score ~ patho, data=mat)$p.value
+  names(wilcox_pval)[i] <- c
+  i <- i+1
+}
+# corrected p-values
+p <- p.adjust(wilcox_pval, method = "hochberg", n = length(wilcox_pval))
+p
+# significative
+p[which(p<0.001)]
+
+# Boxplots - ALCL vs RLN
+type="Fibroblasts"
+d_short <- d_metadat[which(d_metadat$cell_type==type),]
+ggplot(d_short, aes(x=patho, y=score, fill=patho)) +  labs(title=type)+
+geom_boxplot(outlier.colour="turquoise",outlier.size=3) + scale_fill_brewer(palette = "Dark2") +theme_classic()
+type="Mast_cells_resting"
+d_short <- d_metadat[which(d_metadat$cell_type==type),]
+ggplot(d_short, aes(x=patho, y=score, fill=patho)) +  labs(title=type)+
+geom_boxplot(outlier.colour="turquoise",outlier.size=3) +scale_fill_brewer(palette = "Dark2") + theme_classic()
+type="B_cells_memory"
+d_short <- d_metadat[which(d_metadat$cell_type==type),]
+ggplot(d_short, aes(x=patho, y=score, fill=patho)) +  labs(title=type)+
+geom_boxplot(outlier.colour="turquoise",outlier.size=3) +scale_fill_brewer(palette = "Dark2") + theme_classic()
+
+```
+### Barplots sort by ALCL
+
+```{r ciber barplots, warning = FALSE, fig.width=14}
+
+library(RColorBrewer)
+n <- 20
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+
+# barplot with ALCL/LT ids
+ggplot(d_metadat[which(d_metadat$cell_type!="Fibroblasts" & d_metadat$cell_type!="Endothelial_cells"),], aes(fill=cell_type, y=score, x=sample)) + 
+    geom_bar(position="stack", stat="identity") +
+    scale_fill_manual(values=col_vector) +
+    ggtitle("Cibersort LM22..") +
+    theme_light() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),legend.position="bottom")+
+    scale_x_discrete(labels= d_metadat[which(d_metadat$cell_type=="T_cells_CD8"),1]) +xlab("")
+
+```
+
+## CIBERSORT with LM22 matrix depending on the morpho without NA
+
+```{r}
+metadata_patients_short <- metadata_patients[which(metadata_patients$morpho!="NA"),]
+ciber_estim_22_scaled_short <- t(scale(t(ciber_estim_22[,which(colnames(ciber_estim_22)%in%metadata_patients_short$name)])))
+dim(ciber_estim_22_scaled_short)
+
+```
+
+### Hierarchical clustering
+
+```{r}
+
+## use Eculidean distance for columns/samples
+## use ward as agglomeration rule
+hc01.col <- hcopt(dist(t(ciber_estim_22_scaled_short)),method="ward.D")
+## use 1-correlation as distance for for rows/genes
+## use ward as agglomeration rule
+hc01.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short))),method="ward.D")
+
+## making heatmap
+annot <- data.frame(relapse=as.factor(metadata_patients_short[,c("relapse")]),morpho=as.factor(metadata_patients_short[,c("morpho")]))
+rownames(annot) <-metadata_patients_short$name
+annotCol <- list(relapse = c("green", "orange"), morpho=c("turquoise","yellow"))
+names(annotCol$relapse) <- levels(annot$relapse)
+names(annotCol$morpho) <- levels(annot$morpho)
+                 
+heatmaptitle <- paste("ALCL Dataset: ", "top MAD-filtered 4k genes", sep = "")
+
+pheatmap(ciber_estim_22_scaled_short, name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot,
+         annotation_colors = annotCol,
+         cluster_rows=hc01.row,
+         cluster_cols=hc01.col,
+         show_colnames = FALSE,
+         scale = "row")
+```
+
+### Consensus clustering
+
+```{r}
+
+# clustering / k choice
+CCout <- ConsensusClusterPlus(ciber_estim_22_scaled_short,maxK=4,reps=500,pItem=0.8,pFeature=1,
+                              innerLinkage="ward.D", finalLinkage="ward.D",
+                              title="cc",clusterAlg="hc",distance="euclidean",
+                              plot=NULL)
+summary(CCout)
+
+nc <- 2
+## remake heatmap, include both subtype and cluster assignments for visual comparison
+annot1 <- data.frame(annot,cluster=CCout[[nc]]$consensusClass)
+annot1$cluster <- as.factor(annot1$cluster)
+annotCol$cluster <- rainbow(n=nc)
+names(annotCol$cluster) <- unique(annot1$cluster)
+
+## use cluster tree from consensus clustering for column ordering in heatmap
+clust.col <- CCout[[nc]]$consensusTree
+## determine row ordering based on de-novo clustering
+clust.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short))),method="ward.D")
+
+heatmaptitle <- "Heatmap consensus clustering assignment vs. subtype\n top 4k z-score normalized"
+pheatmap(ciber_estim_22_scaled_short, name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot1,
+         annotation_colors = annotCol,
+         cluster_rows=clust.row,
+         cluster_cols=clust.col,
+         #show_rownames = FALSE,
+         show_colnames = FALSE,
+         scale = "row", cutree_cols = 2)
+
+nc <- 3
+## remake heatmap, include both subtype and cluster assignments for visual comparison
+annot1 <- data.frame(annot,cluster=CCout[[nc]]$consensusClass)
+annot1$cluster <- as.factor(annot1$cluster)
+annotCol$cluster <- rainbow(n=nc)
+names(annotCol$cluster) <- unique(annot1$cluster)
+
+## use cluster tree from consensus clustering for column ordering in heatmap
+clust.col <- CCout[[nc]]$consensusTree
+## determine row ordering based on de-novo clustering
+clust.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short))),method="ward.D")
+
+heatmaptitle <- "Heatmap consensus clustering assignment vs. subtype\n top 4k z-score normalized"
+pheatmap(ciber_estim_22_scaled_short, name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot1,
+         annotation_colors = annotCol,
+         cluster_rows=clust.row,
+         cluster_cols=clust.col,
+         #show_rownames = FALSE,
+         show_colnames = FALSE,
+         scale = "row", cutree_cols = 3)
+
+nc <- 4
+## remake heatmap, include both subtype and cluster assignments for visual comparison
+annot1 <- data.frame(annot,cluster=CCout[[nc]]$consensusClass)
+annot1$cluster <- as.factor(annot1$cluster)
+annotCol$cluster <- rainbow(n=nc)
+names(annotCol$cluster) <- unique(annot1$cluster)
+
+## use cluster tree from consensus clustering for column ordering in heatmap
+clust.col <- CCout[[nc]]$consensusTree
+## determine row ordering based on de-novo clustering
+clust.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short))),method="ward.D")
+
+heatmaptitle <- "Heatmap consensus clustering assignment vs. subtype\n top 4k z-score normalized"
+pheatmap(ciber_estim_22_scaled_short, name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot1,
+         annotation_colors = annotCol,
+         cluster_rows=clust.row,
+         cluster_cols=clust.col,
+         #show_rownames = FALSE,
+         show_colnames = FALSE,
+         scale = "row", cutree_cols = 4)
+
+```
+
+## CIBERSORT with LM22 matrix depending on the morpho without NA - removing the T categories
+
+```{r}
+ciber_estim_22_scaled_short_without_T <- t(scale(t(ciber_estim_22[-c(4:10),which(colnames(ciber_estim_22)%in%metadata_patients_short$name)])))
+dim(ciber_estim_22_scaled_short_without_T)
+```
+
+### Hierarchical clustering
+
+```{r}
+
+## use Eculidean distance for columns/samples
+## use ward as agglomeration rule
+hc01.col <- hcopt(dist(t(ciber_estim_22_scaled_short_without_T)),method="ward.D")
+## use 1-correlation as distance for for rows/genes
+## use ward as agglomeration rule
+hc01.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short_without_T))),method="ward.D")
+
+## making heatmap
+annot <- data.frame(relapse=as.factor(metadata_patients_short[,c("relapse")]),morpho=as.factor(metadata_patients_short[,c("morpho")]))
+rownames(annot) <-metadata_patients_short$name
+annotCol <- list(relapse = c("green", "orange"), morpho=c("turquoise","yellow"))
+names(annotCol$relapse) <- levels(annot$relapse)
+names(annotCol$morpho) <- levels(annot$morpho)
+                 
+heatmaptitle <- paste("ALCL Dataset: ", "top MAD-filtered 4k genes", sep = "")
+
+pheatmap(ciber_estim_22_scaled_short_without_T,name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot,
+         annotation_colors = annotCol,
+         cluster_rows=hc01.row,
+         cluster_cols=hc01.col,
+         show_colnames = FALSE,
+         scale = "row", cutree_cols = 2)
+
+```
+
+### Consensus clustering
+
+```{r}
+
+# clustering / k choice
+CCout <- ConsensusClusterPlus(ciber_estim_22_scaled_short_without_T,maxK=4,reps=500,pItem=0.9,pFeature=1,
+                              innerLinkage="ward.D", finalLinkage="ward.D",
+                              title="cc",clusterAlg="hc",distance="euclidean",
+                              plot=NULL)
+summary(CCout)
+
+nc <- 2
+## remake heatmap, include both subtype and cluster assignments for visual comparison
+annot1 <- data.frame(annot,cluster=CCout[[nc]]$consensusClass)
+
+annotCol$cluster <- rainbow(n=nc)
+names(annotCol$cluster) <- unique(annot1$cluster)
+
+## use cluster tree from consensus clustering for column ordering in heatmap
+clust.col <- CCout[[nc]]$consensusTree
+## determine row ordering based on de-novo clustering
+clust.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short_without_T))),method="ward.D")
+
+heatmaptitle <- "Heatmap consensus clustering assignment vs. subtype\n top 4k z-score normalized"
+pheatmap(ciber_estim_22_scaled_short_without_T,name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot1,
+         annotation_colors = annotCol,
+         cluster_rows=clust.row,
+         cluster_cols=clust.col,
+         #show_rownames = FALSE,
+         show_colnames = FALSE,
+         scale = "row", cutree_cols = 2)
+
+nc <- 3
+## remake heatmap, include both subtype and cluster assignments for visual comparison
+annot1 <- data.frame(annot,cluster=CCout[[nc]]$consensusClass)
+annot1$cluster <- as.factor(annot1$cluster)
+annotCol$cluster <- rainbow(n=nc)
+names(annotCol$cluster) <- unique(annot1$cluster)
+
+## use cluster tree from consensus clustering for column ordering in heatmap
+clust.col <- CCout[[nc]]$consensusTree
+## determine row ordering based on de-novo clustering
+clust.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short_without_T))),method="ward.D")
+
+heatmaptitle <- "Heatmap consensus clustering assignment vs. subtype\n top 4k z-score normalized"
+pheatmap(ciber_estim_22_scaled_short_without_T,
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot1,
+         annotation_colors = annotCol,
+         cluster_rows=clust.row,
+         cluster_cols=clust.col,
+         #show_rownames = FALSE,
+         show_colnames = FALSE,
+         scale = "row", cutree_cols = 3)
+```
+## CIBERSORT with LM22 matrix depending on the morpho without NA - removing only the CD8 and CD4 mem activated categories
+
+```{r}
+ciber_estim_22_scaled_short_without_CD8_CD4act <- t(scale(t(ciber_estim_22[-c(4,7),which(colnames(ciber_estim_22)%in%metadata_patients_short$name)])))
+dim(ciber_estim_22_scaled_short_without_CD8_CD4act)
+```
+
+### Hierarchical clustering
+
+```{r}
+
+## use Eculidean distance for columns/samples
+## use ward as agglomeration rule
+hc01.col <- hcopt(dist(t(ciber_estim_22_scaled_short_without_CD8_CD4act)),method="ward.D")
+## use 1-correlation as distance for for rows/genes
+## use ward as agglomeration rule
+hc01.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short_without_CD8_CD4act))),method="ward.D")
+
+## making heatmap
+annot <- data.frame(relapse=as.factor(metadata_patients_short[,c("relapse")]),morpho=as.factor(metadata_patients_short[,c("morpho")]))
+rownames(annot) <-metadata_patients_short$name
+annotCol <- list(relapse = c("green", "purple"), morpho=c("turquoise","yellow"))
+names(annotCol$relapse) <- levels(annot$relapse)
+names(annotCol$morpho) <- levels(annot$morpho)
+                 
+heatmaptitle <- paste("ALCL Dataset: ", "top MAD-filtered 4k genes", sep = "")
+
+pheatmap(ciber_estim_22_scaled_short_without_CD8_CD4act,name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot,
+         annotation_colors = annotCol,
+         cluster_rows=hc01.row,
+         cluster_cols=hc01.col,
+         show_colnames = FALSE,
+         scale = "row")
+```
+
+### Consensus clustering
+
+```{r}
+
+# clustering / k choice
+CCout <- ConsensusClusterPlus(ciber_estim_22_scaled_short_without_CD8_CD4act,maxK=5,reps=1000,pItem=0.8,pFeature=1,
+                              innerLinkage="ward.D", finalLinkage="ward.D",
+                              title="cc",clusterAlg="hc",distance="euclidean",
+                              plot=NULL)
+summary(CCout)
+summary(CCout[[2]])
+nc <- 2
+CCout[[2]]$consensusClass
+## remake heatmap, include both subtype and cluster assignments for visual comparison
+annot1 <- data.frame(annot,cluster=CCout[[nc]]$consensusClass)
+annot1$cluster <- as.factor(annot1$cluster)
+annotCol$cluster <- rainbow(n=nc)
+names(annotCol$cluster) <- unique(annot1$cluster)
+
+## use cluster tree from consensus clustering for column ordering in heatmap
+clust.col <- CCout[[nc]]$consensusTree
+## determine row ordering based on de-novo clustering
+clust.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short_without_CD8_CD4act))),method="ward.D")
+
+heatmaptitle <- "Heatmap consensus clustering assignment vs. subtype"
+pheatmap(ciber_estim_22_scaled_short_without_CD8_CD4act,name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot1,
+         annotation_colors = annotCol,
+         cluster_rows=clust.row,
+         cluster_cols=clust.col,
+         #show_rownames = FALSE,
+         show_colnames = FALSE, cutree_cols = 2,
+         scale = "row", cutree_rows = 5)
+
+nc <- 3
+## remake heatmap, include both subtype and cluster assignments for visual comparison
+annot1 <- data.frame(annot,cluster=CCout[[nc]]$consensusClass)
+annot1$cluster <- as.factor(annot1$cluster)
+annotCol$cluster <- c("red","green","blue")
+names(annotCol$cluster) <- unique(annot1$cluster)
+
+## use cluster tree from consensus clustering for column ordering in heatmap
+clust.col <- CCout[[nc]]$consensusTree
+## determine row ordering based on de-novo clustering
+clust.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short_without_CD8_CD4act))),method="ward.D")
+
+heatmaptitle <- "Heatmap consensus clustering assignment vs. subtype"
+pheatmap(ciber_estim_22_scaled_short_without_CD8_CD4act,name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot1,
+         annotation_colors = annotCol,
+         cluster_rows=clust.row,
+         cluster_cols=clust.col,
+         #show_rownames = FALSE,
+         show_colnames = FALSE, cutree_cols = 3,
+         scale = "row", cutree_rows = 5)
+
+nc <- 4
+## remake heatmap, include both subtype and cluster assignments for visual comparison
+annot1 <- data.frame(annot,cluster=CCout[[nc]]$consensusClass)
+annot1$cluster <- as.factor(annot1$cluster)
+# write.table(annot1,file = "../clusters_ciber_mcp_estim_scaled_short_without_CD8_CD4act.tsv",quote = FALSE, row.names = TRUE, sep = "\t")
+annotCol$cluster <- c("red","green","blue", "yellow")
+names(annotCol$cluster) <- unique(annot1$cluster)
+## use cluster tree from consensus clustering for column ordering in heatmap
+clust.col <- CCout[[nc]]$consensusTree
+## determine row ordering based on de-novo clustering
+clust.row <- hcopt(as.dist(1-cor(t(ciber_estim_22_scaled_short_without_CD8_CD4act))),method="ward.D")
+
+heatmaptitle <- "Heatmap consensus clustering, MET sub-populations"
+pheatmap(ciber_estim_22_scaled_short_without_CD8_CD4act, name = "scaled score",
+         main=heatmaptitle,
+         color=colGradient(c("blue","white","red"),length=15),
+         annotation_col = annot1,
+         annotation_colors = annotCol,
+         cluster_rows=clust.row,
+         cluster_cols=clust.col,
+         #show_rownames = FALSE,
+         show_colnames = FALSE, cutree_cols = 4,
+         scale = "row", cutree_rows = 5)
+```
+
+# differential analysis
+
+* removing genes with count < 10 in less than 30% of the samples
+
+```{r}
+library(sleuth)
+load(file="./so_patients_rf_cluster-wo-CD8-CD4act_gene-mode_log2-pc1.RData")
+(summary(so_cluster))
+
+```
+
+## Visualize the data with basic plots
+
+* PCA
+  + PCA for morpho 0 and 1
+  + Analyse of PC1 genes contribution
+  + Explained variance (%)
+  
+Note => PCA is computed on the transcript expressions (tpm)
+
+* Samples inter-correlation heatmap
+
+
+```{r}
+    
+# PCA of the samples
+plot_pca(so_cluster, color_by = 'cluster', text_labels = TRUE, units = "tpm")+theme_bw()
+# PC1 : contribution scores
+plot_loadings(so_cluster, pc_input = 1, units = 'tpm')+ xlab("genes") +theme_bw()
+# PCA : explained variance  
+plot_pc_variance(so_cluster, pc_input = 1, units = 'tpm')+theme_bw()
+
+# samples inter-correlations
+plot_sample_heatmap(so_cluster, color_high = "#2dacbd", color_low = "white")+theme_bw()
+```
+
+```{r}
+
+# Non-null hypothesis = expression depend on morpho
+so_cluster <- sleuth_fit(so_cluster, ~cluster, 'full')
+
+# Null hypothesis = model where expression depends on the sample name (~1 first col)
+so_cluster <- sleuth_fit(so_cluster, ~1, 'reduced')
+
+models(so_cluster)
+# Likelihood ratio test between the 2 models
+so_cluster <- sleuth_lrt(so_cluster, 'reduced', 'full')
+```
+### 2. results with WT (Wald Test)
+
+This test is useful to extract fold change values (beta value) - less stringent than LRT
+
+```{r}
+
+# examine the models that have been fitted
+models(so_cluster)
+so_cluster <- sleuth_wt(so_cluster,which_beta = 'cluster1')
+sleuth_so_results_wt_morpho <- sleuth_results(so_cluster, test = 'cluster1')
+## qval < 0.05
+sleuth_so_results_wt_morpho_sign <- dplyr::filter(sleuth_so_results_wt_morpho, qval < 0.05)
+dim(sleuth_so_results_wt_morpho_sign)
+head(sleuth_so_results_wt_morpho_sign)
+## qval < 0.01
+sleuth_so_results_wt_morpho_1 <- dplyr::filter(sleuth_so_results_wt_morpho, qval < 0.01)
+dim(sleuth_so_results_wt_morpho_1)
+# With log2FC >1 (~meaning FC >2)
+dim(sleuth_so_results_wt_morpho_1[which(abs(sleuth_so_results_wt_morpho_1$b)>1),])
+sleuth_so_results_wt_morpho_1_logFC_1 <- sleuth_so_results_wt_morpho_1[which(abs(sleuth_so_results_wt_morpho_1$b)>1),]
+# With log2FC >1 (~meaning FC >2)
+# With log2FC >1 (~meaning FC >2)
+dim(sleuth_so_results_wt_morpho_1[which(abs(sleuth_so_results_wt_morpho_1$b)>1.5),])
+sleuth_so_results_wt_morpho_1_logFC_1.5 <- sleuth_so_results_wt_morpho_1[which(abs(sleuth_so_results_wt_morpho_1$b)>1.5),]
+
+# heatmap of the top genes 
+plot_transcript_heatmap(so_cluster, transcripts = sleuth_so_results_wt_morpho_1_logFC_1$target_id[1:30], color_high = "#2dacbd", color_mid ="#e3b38f", color_low = "#f5fbfc", units = 'scaled_reads_per_base', labels_row = sleuth_so_results_wt_morpho_1_logFC_1$ext_gene[1:30], annotation_cols = c("cluster"))
+
+# heatmap of the top genes 
+plot_transcript_heatmap(so_cluster, transcripts = sleuth_so_results_wt_morpho_1_logFC_1.5$target_id, color_high = "#2dacbd", color_mid ="#e3b38f", color_low = "#f5fbfc", units = 'scaled_reads_per_base', labels_row = sleuth_so_results_wt_morpho_1_logFC_1.5$ext_gene, annotation_cols = c("cluster"))
+
+```
+
+### 2. results with WT (Wald Test)
+
+This test is useful to extract fold change values (beta value) - less stringent than LRT
+
+```{r}
+
+# examine the models that have been fitted
+models(so_cluster)
+so_cluster <- sleuth_wt(so_cluster,which_beta = 'cluster1')
+sleuth_so_results_wt_morpho <- sleuth_results(so_cluster, test = 'cluster1')
+## qval < 0.05
+sleuth_so_results_wt_morpho_sign <- dplyr::filter(sleuth_so_results_wt_morpho, qval < 0.05)
+dim(sleuth_so_results_wt_morpho_sign)
+head(sleuth_so_results_wt_morpho_sign)
+## qval < 0.01
+sleuth_so_results_wt_morpho_1 <- dplyr::filter(sleuth_so_results_wt_morpho, qval < 0.01)
+dim(sleuth_so_results_wt_morpho_1)
+# With log2FC >1 (~meaning FC >2)
+dim(sleuth_so_results_wt_morpho_1[which(abs(sleuth_so_results_wt_morpho_1$b)>1),])
+sleuth_so_results_wt_morpho_1_logFC_1 <- sleuth_so_results_wt_morpho_1[which(abs(sleuth_so_results_wt_morpho_1$b)>1),]
+# With log2FC >1 (~meaning FC >2)
+# With log2FC >1 (~meaning FC >2)
+dim(sleuth_so_results_wt_morpho_1[which(abs(sleuth_so_results_wt_morpho_1$b)>1.5),])
+sleuth_so_results_wt_morpho_1_logFC_1.5 <- sleuth_so_results_wt_morpho_1[which(abs(sleuth_so_results_wt_morpho_1$b)>1.5),]
+
+# heatmap of the top genes 
+plot_transcript_heatmap(so_cluster, transcripts = sleuth_so_results_wt_morpho_1_logFC_1$target_id[1:30], color_high = "#2dacbd", color_mid ="#e3b38f", color_low = "#f5fbfc", units = 'scaled_reads_per_base', labels_row = sleuth_so_results_wt_morpho_1_logFC_1$ext_gene[1:30], annotation_cols = c("cluster"))
+
+# heatmap of the top genes 
+plot_transcript_heatmap(so_cluster, transcripts = sleuth_so_results_wt_morpho_1_logFC_1.5$target_id, color_high = "#2dacbd", color_mid ="#e3b38f", color_low = "#f5fbfc", units = 'scaled_reads_per_base', labels_row = sleuth_so_results_wt_morpho_1_logFC_1.5$ext_gene, annotation_cols = c("cluster"))
+
+```
